@@ -1,7 +1,7 @@
 import os
 import argparse
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from pathlib import Path
 
 import numpy as np
@@ -93,6 +93,31 @@ def get_files_to_process(input_path: str) -> List[str]:
 
 
 @torch.no_grad()
+def face_parsing_infer_single(model: Union[torch.nn.Module, str], image: Image, device: Optional[str] = None, exclusion: Optional[List[str]] = None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+    if exclusion is None:
+        exclusion = []
+
+    # Prepare image for inference
+    image_batch = prepare_image(image).to(device)
+
+    if isinstance(model, str):
+        num_classes = 19
+        model = load_model("resnet34", num_classes, model, device)
+
+    # Run inference
+    output = model(image_batch)[0]  # feat_out, feat_out16, feat_out32 -> use feat_out for inference only
+    output[0, exclusion] *= 0;
+    predicted_mask = output.squeeze(0).cpu().numpy().argmax(0)
+
+    # Convert mask to PIL Image for resizing
+    predicted_mask = Image.fromarray(predicted_mask.astype(np.uint8))
+    return predicted_mask
+
+
+@torch.no_grad()
 def inference(params: argparse.Namespace) -> None:
     """
     Run inference on images using the face parsing model.
@@ -129,32 +154,9 @@ def inference(params: argparse.Namespace) -> None:
             # Load and process the image
             image = Image.open(file_path).convert("RGB")
 
-            # Store original image resolution
-            original_size = image.size  # (width, height)
+            predicted_mask = face_parsing_infer_single(model, image, device)
 
-            # Prepare image for inference
-            image_batch = prepare_image(image).to(device)
-
-            # Run inference
-            output = model(image_batch)[0]  # feat_out, feat_out16, feat_out32 -> use feat_out for inference only
-            predicted_mask = output.squeeze(0).cpu().numpy().argmax(0)
-
-            # Convert mask to PIL Image for resizing
-            mask_pil = Image.fromarray(predicted_mask.astype(np.uint8))
-
-            # Resize mask back to original image resolution
-            restored_mask = mask_pil.resize(original_size, resample=Image.NEAREST)
-
-            # Convert back to numpy array
-            predicted_mask = np.array(restored_mask)
-
-            # Visualize and save the results
-            vis_parsing_maps(
-                image,
-                predicted_mask,
-                save_image=True,
-                save_path=save_path,
-            )
+            predicted_mask.save(save_path, compress_level=0)
 
         except Exception as e:
             logger.error(f"Error processing {file_path}: {e}")
